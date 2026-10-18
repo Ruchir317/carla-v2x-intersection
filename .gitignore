@@ -1,8 +1,13 @@
-# Ignore everything except our custom scripts
-*
-!/.gitignore
-!/README.md
-!/PythonAPI/
-!/PythonAPI/examples/
-!/PythonAPI/examples/coop_v2x/
-!/PythonAPI/examples/coop_v2x/*.py
+# Python
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+
+# Simulation output
+metrics*.csv
+
+# Editors and OS
+.vscode/
+.DS_Store
+Thumbs.db
