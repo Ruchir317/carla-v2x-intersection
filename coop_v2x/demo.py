@@ -1,113 +1,111 @@
-"""Run the real IntersectionManager against simple simulated cars. No CARLA needed.
+"""Run the real controllers against simulated cars. No CARLA needed.
 
-    python -m coop_v2x.demo
+    python -m coop_v2x.demo                       # one run with the conflict-aware manager
+    python -m coop_v2x.demo --controller signal   # the fixed-cycle traffic light baseline
+    python -m coop_v2x.demo --compare             # all controllers on the same scenario
 
-Four cars approach a crossroads from the four compass directions at a steady speed. Each stops at its
-stop point unless the manager has granted it permission, exactly as VehicleAgent does in CARLA. This is a
-logic demonstration (queueing order, one car in the box at a time, metrics), not a physics simulation.
+The cars are a simple kinematic model (see offline_sim.py): good for seeing how each controller orders
+and queues traffic, not for predicting CARLA's numbers.
 """
 import argparse
-import math
+import os
 import tempfile
-from dataclasses import dataclass
-from typing import List
+from typing import List, Optional, Tuple
 
 from .analyze_metrics import format_summary, load_rows, summarise
-from .intersection_manager import IntersectionManager
 from .logging_utils import MetricsLogger
+from .messaging import Mailbox
+from .offline_sim import Geometry, build_scenario, make_controller, run_scenario
+
+CONTROLLERS = ("conflict-aware", "fcfs", "signal")
 
 
-@dataclass
-class Point:
-    x: float
-    y: float
-
-    def distance(self, other: "Point") -> float:
-        return math.hypot(self.x - other.x, self.y - other.y)
-
-
-class FakeVehicle:
-    def __init__(self, vehicle_id: int, position: Point):
-        self.id = vehicle_id
-        self.position = position
-
-    def get_location(self) -> Point:
-        return self.position
-
-
-class FakeAgent:
-    """Drives straight through the centre at constant speed; holds at its stop point without permission."""
-
-    def __init__(self, vehicle_id: int, start: Point, center: Point, speed: float, approach: float, stop_radius: float = 2.0):
-        self.vehicle = FakeVehicle(vehicle_id, start)
-        self.speed = speed
-        self.stop_radius = stop_radius
-        length = start.distance(center)
-        self.heading = Point((center.x - start.x) / length, (center.y - start.y) / length)
-        # Same placement as run_simulation: STOP_RADIUS inside the approach radius.
-        stop_distance = approach - stop_radius
-        self.stop_location = Point(center.x - self.heading.x * stop_distance, center.y - self.heading.y * stop_distance)
-
-    def distance_to(self, location: Point) -> float:
-        return self.vehicle.position.distance(location)
-
-    def step(self, permission_to_go: bool, dt: float):
-        if not permission_to_go and self.distance_to(self.stop_location) <= self.stop_radius:
-            return
-        pos = self.vehicle.position
-        self.vehicle.position = Point(pos.x + self.heading.x * self.speed * dt, pos.y + self.heading.y * self.speed * dt)
-
-
-def run_demo(
-    logfile: str,
-    start_distances=(40.0, 45.0, 50.0, 55.0),
-    approach: float = 35.0,
-    box: float = 12.0,
+def run(
+    controller_name: str,
+    vehicles: int = 16,
     speed: float = 7.0,
-    max_active: int = 1,
-    dt: float = 0.1,
-    duration: float = 120.0,
-) -> List:
-    """Simulate until every car has cleared the junction. Returns the finished VehicleStates in order."""
-    center = Point(0.0, 0.0)
-    directions = [(1, 0), (0, 1), (-1, 0), (0, -1)]
-    agents = [
-        FakeAgent(i, Point(dx * d, dy * d), center, speed, approach)
-        for i, (d, (dx, dy)) in enumerate(zip(start_distances, directions))
+    logfile: Optional[str] = None,
+    geometry: Geometry = Geometry(),
+    **options,
+) -> Tuple[List, dict]:
+    """One simulated run. Returns the finished vehicle states and the summary statistics."""
+    mailbox = Mailbox()
+    controller = make_controller(controller_name, geometry, **options)
+    finished = run_scenario(controller, mailbox, build_scenario(vehicles, geometry), geometry, speed=speed)
+    if len(finished) < vehicles:  # never average over the cars that happened to finish
+        raise RuntimeError(f"only {len(finished)} of {vehicles} vehicles cleared the junction before the time limit")
+
+    path = logfile or tempfile.NamedTemporaryFile(suffix=".csv", delete=False).name
+    logger = MetricsLogger(path)
+    for state in finished:
+        logger.log_state(state)
+    logger.close()
+    summary = summarise(load_rows(path))
+    if logfile is None:
+        os.unlink(path)
+    return finished, summary
+
+
+def print_run(finished: List, summary: dict) -> None:
+    print("car  side  turn      arrived  allowed  entered  exited")
+    for s in sorted(finished, key=lambda s: s.permission_time):
+        print(
+            f"{s.vehicle_id:>3}  {s.side:>4}  {s.intent.value:<8}  {s.arrival_time:7.1f}  {s.permission_time:7.1f}"
+            f"  {s.enter_time:7.1f}  {s.exit_time:6.1f}"
+        )
+    print()
+    print(format_summary(summary))
+
+
+def print_comparison(vehicles: int, speed: float, geometry: Geometry) -> None:
+    rows = [
+        ("signal, one approach at a time (conflict-free)", "signal", speed, {"phases": "split"}),
+        ("signal, two phases (not conflict-free)", "signal", speed, {"phases": "axis"}),
+        ("first-come-first-served, one at a time", "fcfs", speed, {}),
+        ("conflict-aware", "conflict-aware", speed, {}),
     ]
-    manager = IntersectionManager(center, approach_radius=approach, box_half_extent=box, max_active=max_active)
-    logger = MetricsLogger(logfile)
-    finished: List = []
-    try:
-        t = 0.0
-        while t < duration and len(finished) < len(agents):
-            manager.update(agents, t)
-            permissions = manager.current_permissions()
-            for agent in agents:
-                agent.step(permissions.get(agent.vehicle.id, False), dt)
-            for state in manager.poll_completed():
-                logger.log_state(state)
-                finished.append(state)
-            t += dt
-    finally:
-        logger.close()
-    return finished
+    print(
+        f"{vehicles} vehicles, approach {geometry.approach:g} m, box half-extent {geometry.box:g} m; "
+        f"same scenario in every row\n"
+    )
+    print(f"{'controller':<48} {'avg wait':>9} {'avg cross':>10} {'clear all':>10} {'veh/min':>8}")
+    for label, name, v, options in rows:
+        _, s = run(name, vehicles, v, geometry=geometry, **options)
+        print(
+            f"{label:<48} {s['avg_wait_s']:>8.1f}s {s['avg_crossing_s']:>9.1f}s {s['clearance_s']:>9.1f}s "
+            f"{s['throughput_per_min']:>8.1f}"
+        )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Offline demo of the intersection manager.")
-    parser.add_argument("--max-active", type=int, default=1, help="cars allowed through at once")
-    parser.add_argument("--logfile", default=None, help="where to write the metrics CSV (default: a temp file)")
+    parser = argparse.ArgumentParser(description="Offline demo of the intersection controllers.")
+    parser.add_argument("--controller", choices=CONTROLLERS, default="conflict-aware")
+    parser.add_argument("--compare", action="store_true", help="run every controller on the same scenario")
+    parser.add_argument("--vehicles", type=int, default=16, help="number of cars, spread over four approaches")
+    parser.add_argument("--speed", type=float, default=7.0, help="car speed in m/s (7 is about 25 km/h)")
+    parser.add_argument("--approach", type=float, default=Geometry.approach, help="approach radius in metres")
+    parser.add_argument("--box", type=float, default=Geometry.box, help="half-extent of the intersection box in metres")
+    parser.add_argument("--max-active", type=int, default=None, help="cap on cars holding a permission at once")
+    parser.add_argument("--green", type=float, default=10.0, help="signal: green seconds per phase")
+    parser.add_argument("--all-red", type=float, default=2.0, help="signal: all-red seconds between phases")
+    parser.add_argument(
+        "--phases", choices=("split", "axis"), default="split", help="signal: one approach at a time, or two axis phases"
+    )
+    parser.add_argument("--logfile", default=None, help="also write the metrics CSV here")
     args = parser.parse_args()
 
-    logfile = args.logfile or tempfile.NamedTemporaryFile(suffix=".csv", delete=False).name
-    finished = run_demo(logfile, max_active=args.max_active)
-    print("car  arrived  allowed  entered  exited")
-    for s in sorted(finished, key=lambda s: s.permission_time):
-        print(f"{s.vehicle_id:>3}  {s.arrival_time:7.1f}  {s.permission_time:7.1f}  {s.enter_time:7.1f}  {s.exit_time:6.1f}")
-    print()
-    print(format_summary(summarise(load_rows(logfile))))
-    print(f"\nMetrics written to {logfile}")
+    geometry = Geometry(approach=args.approach, box=args.box)
+    if args.compare:
+        print_comparison(args.vehicles, args.speed, geometry)
+        return
+    if args.controller == "signal":
+        options = {"green": args.green, "all_red": args.all_red, "phases": args.phases}
+    else:
+        options = {"max_active": args.max_active}
+    finished, summary = run(args.controller, args.vehicles, args.speed, args.logfile, geometry, **options)
+    print_run(finished, summary)
+    if args.logfile:
+        print(f"\nMetrics written to {args.logfile}")
 
 
 if __name__ == "__main__":
