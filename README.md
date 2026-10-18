@@ -143,3 +143,7 @@ pytest
 - The intersection box is axis-aligned, so on a junction rotated against the world axes it is only an approximation; `--junction-yaw` aligns the sides but not the box.
 - Communication is instant and lossless. A real V2X link would add delay, loss and range limits.
 - One junction, fully cooperative vehicles, no pedestrians or human drivers.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
