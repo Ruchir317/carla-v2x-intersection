@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
-import carla
+if TYPE_CHECKING:  # CARLA is only needed for type hints, so the manager can be tested without it
+    import carla
 
-from vehicle_agent import VehicleAgent
+    from .vehicle_agent import VehicleAgent
 
 
 @dataclass
@@ -22,10 +23,12 @@ class VehicleState:
 
 class IntersectionManager:
     """
-    Minimal FCFS intersection manager.
+    First-come-first-served intersection manager.
     - Tracks vehicles entering an approach radius.
-    - Grants permission to one vehicle at a time.
-    - Clears permission after the vehicle passes the intersection box.
+    - Grants permission in arrival order, up to `max_active` vehicles at a time.
+    - Releases a vehicle's permission once it has crossed the intersection box and driven clear.
+    - Optionally revokes a permission the vehicle never used (`permission_timeout`, in seconds), so one
+      misrouted vehicle cannot block the queue forever.
     """
 
     def __init__(
@@ -34,37 +37,39 @@ class IntersectionManager:
         approach_radius: float = 25.0,
         box_half_extent: float = 8.0,
         max_active: int = 1,
+        permission_timeout: Optional[float] = None,
     ):
         self.center = center
         self.approach_radius = approach_radius
         self.box_half_extent = box_half_extent
+        self.permission_timeout = permission_timeout
         self._states: Dict[int, VehicleState] = {}
         self._active_ids: List[int] = []
         self._max_active = max(1, max_active)
 
     def update(self, agents: List[VehicleAgent], timestamp: float):
+        live_ids = {agent.vehicle.id for agent in agents}
+
         # Register arrivals.
         for agent in agents:
             vid = agent.vehicle.id
-            dist = agent.distance_to(self.center)
-            state = self._states.get(vid)
-            if dist <= self.approach_radius and state is None:
+            if vid not in self._states and agent.distance_to(self.center) <= self.approach_radius:
                 self._states[vid] = VehicleState(vehicle_id=vid, arrival_time=timestamp)
 
-        # Drop cleared/removed vehicles from tracking.
-        dead_ids = [vid for vid in self._states if not any(a.vehicle.id == vid for a in agents)]
-        for vid in dead_ids:
+        # Drop removed vehicles from tracking.
+        for vid in [vid for vid in self._states if vid not in live_ids]:
             self._states.pop(vid, None)
             if vid in self._active_ids:
                 self._active_ids.remove(vid)
 
-        # Update in_box flags and clear exiting vehicles.
+        # Update in_box flags and clear vehicles that have crossed and driven away.
         for agent in agents:
             vid = agent.vehicle.id
             state = self._states.get(vid)
             if state is None:
                 continue
             in_box = self._is_in_box(agent.vehicle.get_location())
+            dist = agent.distance_to(self.center)  # this vehicle's own distance, not the last one seen
             if in_box and not state.in_box:
                 state.in_box = True
                 if state.enter_time is None:
@@ -74,6 +79,18 @@ class IntersectionManager:
                 if state.exit_time is None:
                     state.exit_time = timestamp
                 if vid in self._active_ids:
+                    self._active_ids.remove(vid)
+
+        # Revoke permissions that were never used.
+        if self.permission_timeout is not None:
+            for vid in list(self._active_ids):
+                state = self._states[vid]
+                if (
+                    state.enter_time is None
+                    and state.permission_time is not None
+                    and timestamp - state.permission_time > self.permission_timeout
+                ):
+                    state.cleared = True
                     self._active_ids.remove(vid)
 
         # Assign permissions up to the allowed active count.
@@ -96,7 +113,7 @@ class IntersectionManager:
 
     def poll_completed(self) -> List[VehicleState]:
         finished: List[VehicleState] = []
-        for vid, state in self._states.items():
+        for state in self._states.values():
             if state.cleared and not state.exported:
                 finished.append(state)
                 state.exported = True
@@ -105,6 +122,6 @@ class IntersectionManager:
     def _is_in_box(self, location: carla.Location) -> bool:
         # Axis-aligned box around center. Adjust for your target junction geometry if needed.
         return (
-            abs(location.x - self.center.x) <= self.box_half_extent and
-            abs(location.y - self.center.y) <= self.box_half_extent
+            abs(location.x - self.center.x) <= self.box_half_extent
+            and abs(location.y - self.center.y) <= self.box_half_extent
         )

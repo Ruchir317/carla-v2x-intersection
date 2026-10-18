@@ -1,15 +1,24 @@
 import argparse
 import math
 import random
-import time
 from typing import List, Optional
 
 import carla
-from agents.navigation.global_route_planner import GlobalRoutePlanner
 
-from intersection_manager import IntersectionManager, VehicleState
-from logging_utils import MetricsLogger
-from vehicle_agent import VehicleAgent
+from .carla_env import ensure_carla_path
+
+ensure_carla_path()
+from agents.navigation.global_route_planner import GlobalRoutePlanner  # noqa: E402
+
+from .intersection_manager import IntersectionManager  # noqa: E402
+from .logging_utils import MetricsLogger  # noqa: E402
+from .vehicle_agent import VehicleAgent  # noqa: E402
+
+
+# A vehicle brakes once it is within STOP_RADIUS of its stop point. The stop point is placed STOP_RADIUS inside
+# the approach radius so braking can never start before the manager has registered the vehicle; otherwise a
+# vehicle could halt just outside the radius and wait forever.
+STOP_RADIUS = 2.0
 
 
 def get_client(host: str, port: int) -> carla.Client:
@@ -112,6 +121,11 @@ def main():
     parser.add_argument("--dest-indices", type=str, default=None, help="comma-separated destination indices")
     parser.add_argument("--logfile", type=str, default="metrics.csv", help="CSV log output")
     parser.add_argument("--max-active", type=int, default=1, help="max vehicles allowed to receive permission simultaneously")
+    parser.add_argument("--duration", type=float, default=120.0, help="stop after this many simulated seconds")
+    parser.add_argument(
+        "--permission-timeout", type=float, default=None,
+        help="revoke a permission the vehicle has not used after this many simulated seconds (default: never)",
+    )
     parser.add_argument("--list-spawns", action="store_true", help="list spawn points and exit")
     parser.add_argument("--list-junctions", action="store_true", help="list junction centers/extents and exit")
     args = parser.parse_args()
@@ -180,7 +194,7 @@ def main():
             distance = math.sqrt(direction.x ** 2 + direction.y ** 2)
             if distance < 1e-3:
                 return carla.Location(center_location.x, center_location.y, center_location.z)
-            scale = min(args.approach, distance)
+            scale = max(min(args.approach - STOP_RADIUS, distance), 0.0)
             direction.x = direction.x / distance * scale
             direction.y = direction.y / distance * scale
             return carla.Location(
@@ -203,7 +217,7 @@ def main():
                     destination=destination,
                     start_location=start_location,
                     stop_location=stop_location,
-                    stop_radius=2.0,
+                    stop_radius=STOP_RADIUS,
                     route_planner=route_planner,
                 )
             )
@@ -213,6 +227,7 @@ def main():
             approach_radius=args.approach,
             box_half_extent=args.box,
             max_active=args.max_active,
+            permission_timeout=args.permission_timeout,
         )
         logger = MetricsLogger(args.logfile)
 
@@ -236,10 +251,9 @@ def main():
                 for state in completed:
                     logger.log_state(state)
 
-            # Basic exit after 2 simulated minutes to avoid runaway runs.
-            if start_sim_time is not None and (timestamp - start_sim_time) > 120:
+            # Stop after --duration simulated seconds to avoid runaway runs.
+            if (timestamp - start_sim_time) > args.duration:
                 break
-            time.sleep(0.001)
     except KeyboardInterrupt:
         pass
     finally:

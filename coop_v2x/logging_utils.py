@@ -2,7 +2,7 @@ import csv
 from pathlib import Path
 from typing import Optional
 
-from intersection_manager import VehicleState
+from .intersection_manager import VehicleState
 
 
 class MetricsLogger:

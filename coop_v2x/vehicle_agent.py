@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Optional
 
 import carla
-from agents.navigation.basic_agent import BasicAgent
+
+from .carla_env import ensure_carla_path
+
+ensure_carla_path()
+from agents.navigation.basic_agent import BasicAgent  # noqa: E402
 from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 
