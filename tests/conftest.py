@@ -8,9 +8,17 @@ import pytest
 @pytest.fixture
 def carla_stubs(monkeypatch):
     """Minimal stand-ins for `carla` and CARLA's `agents` package, so the CARLA-facing modules import."""
-    carla = types.ModuleType("carla")
+    class FakeCarla(types.ModuleType):
+        """Any CARLA class the code merely names in a type hint (Transform, World, ...) resolves to a
+        placeholder; Python before 3.14 evaluates those hints when the function is defined."""
+
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return type(name, (), {})
+
+    carla = FakeCarla("carla")
     carla.Location = SimpleNamespace
-    carla.World = carla.Vehicle = carla.Client = object
     carla.VehicleControl = lambda **kwargs: SimpleNamespace(**kwargs)
 
     class BasicAgent:

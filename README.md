@@ -1,5 +1,7 @@
 # Cooperative V2X Intersection for CARLA
 
+[![tests](https://github.com/Ruchir317/carla-v2x-intersection/actions/workflows/tests.yml/badge.svg)](https://github.com/Ruchir317/carla-v2x-intersection/actions/workflows/tests.yml) ![license](https://img.shields.io/badge/license-MIT-blue)
+
 A traffic-light-free junction. Vehicles talk to an **intersection manager** over a V2X-style message link, and the manager lets them through in arrival order, as long as their turns do not cross or merge. Built for the [CARLA](https://carla.org/) simulator (0.9.16) and described on the [project page](https://ruchirjadhav.dev/projects/carla-v2x-intersection).
 
 The control logic is plain Python with no CARLA dependency, so it is tested and demonstrated offline; only the thin simulator glue needs a CARLA server.
